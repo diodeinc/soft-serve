@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/charmbracelet/soft-serve/pkg/backend"
 	"github.com/charmbracelet/soft-serve/pkg/config"
 	"github.com/charmbracelet/soft-serve/pkg/jwk"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
@@ -13,6 +14,7 @@ import (
 
 // JWTCommand returns a command that generates a JSON Web Token.
 func JWTCommand() *cobra.Command {
+	var asUsername string
 	cmd := &cobra.Command{
 		Use:   "jwt [repository1 repository2...]",
 		Short: "Generate a JSON Web Token",
@@ -28,6 +30,15 @@ func JWTCommand() *cobra.Command {
 			user := proto.UserFromContext(ctx)
 			if user == nil {
 				return proto.ErrUserNotFound
+			}
+			if asUsername != "" {
+				if !user.IsAdmin() {
+					return proto.ErrUnauthorized
+				}
+				user, err = backend.FromContext(ctx).User(ctx, asUsername)
+				if err != nil {
+					return err
+				}
 			}
 
 			now := time.Now()
@@ -52,6 +63,7 @@ func JWTCommand() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&asUsername, "as", "", "generate the token as another user (admin only)")
 
 	return cmd
 }
