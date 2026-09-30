@@ -32,11 +32,18 @@ func authenticate(r *http.Request, repo string) (proto.User, error) {
 // ErrInvalidPassword is returned when the password is invalid.
 var ErrInvalidPassword = errors.New("invalid password")
 
-func parseUsernamePassword(ctx context.Context, username, password string) (proto.User, error) {
+func parseUsernamePassword(ctx context.Context, username, password, repo string) (proto.User, error) {
 	logger := log.FromContext(ctx)
 	be := backend.FromContext(ctx)
 
 	if username != "" && password != "" {
+		if strings.Count(password, ".") == 2 {
+			user, err := userFromJWT(ctx, password, repo)
+			if err == nil && user.Username() == username {
+				return user, nil
+			}
+		}
+
 		user, err := be.User(ctx, username)
 		if err == nil && user != nil && backend.VerifyPassword(password, user.Password()) {
 			return user, nil
@@ -96,39 +103,45 @@ func parseAuthHdr(r *http.Request, repo string) (proto.User, error) {
 
 		return user, nil
 	case "bearer":
-		claims, err := parseJWT(ctx, parts[1], repo)
-		if err != nil {
-			return nil, err
-		}
-
-		// Find the user
-		parts := strings.SplitN(claims.Subject, "#", 2)
-		if len(parts) != 2 {
-			logger.Error("invalid jwt subject", "subject", claims.Subject)
-			return nil, errors.New("invalid jwt subject")
-		}
-
-		user, err := be.User(ctx, parts[0])
-		if err != nil {
-			logger.Error("failed to get user", "err", err)
-			return nil, err
-		}
-
-		expectedSubject := fmt.Sprintf("%s#%d", user.Username(), user.ID())
-		if expectedSubject != claims.Subject {
-			logger.Error("invalid jwt subject", "subject", claims.Subject, "expected", expectedSubject)
-			return nil, errors.New("invalid jwt subject")
-		}
-
-		return user, nil
+		return userFromJWT(ctx, parts[1], repo)
 	default:
 		username, password, ok := r.BasicAuth()
 		if !ok {
 			return nil, ErrInvalidHeader
 		}
 
-		return parseUsernamePassword(ctx, username, password)
+		return parseUsernamePassword(ctx, username, password, repo)
 	}
+}
+
+func userFromJWT(ctx context.Context, token, repo string) (proto.User, error) {
+	logger := log.FromContext(ctx).WithPrefix("http.auth")
+	be := backend.FromContext(ctx)
+
+	claims, err := parseJWT(ctx, token, repo)
+	if err != nil {
+		return nil, err
+	}
+
+	parts := strings.SplitN(claims.Subject, "#", 2)
+	if len(parts) != 2 {
+		logger.Error("invalid jwt subject", "subject", claims.Subject)
+		return nil, errors.New("invalid jwt subject")
+	}
+
+	user, err := be.User(ctx, parts[0])
+	if err != nil {
+		logger.Error("failed to get user", "err", err)
+		return nil, err
+	}
+
+	expectedSubject := fmt.Sprintf("%s#%d", user.Username(), user.ID())
+	if expectedSubject != claims.Subject {
+		logger.Error("invalid jwt subject", "subject", claims.Subject, "expected", expectedSubject)
+		return nil, errors.New("invalid jwt subject")
+	}
+
+	return user, nil
 }
 
 // ErrInvalidToken is returned when a token is invalid.
