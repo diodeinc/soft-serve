@@ -18,6 +18,19 @@ stdout '.*\..*\..*'
 usoft jwt repo
 stdout '.*\..*\..*'
 
+# jwt as http basic password
+soft repo create repo
+soft jwt repo
+cp stdout jwtfile
+envfile JWT=jwtfile
+mkdir ./repo
+git -c init.defaultBranch=master -C repo init
+mkfile ./repo/README.md '# Project'
+git -C repo add -A
+git -C repo commit -m 'first'
+! git -C repo push http://user1:$JWT@localhost:$HTTP_PORT/repo HEAD
+git -C repo push http://admin:$JWT@localhost:$HTTP_PORT/repo HEAD
+
 # stop the server
 [windows] stopserver
 [windows] ! stderr .
