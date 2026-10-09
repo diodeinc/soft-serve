@@ -62,6 +62,9 @@ func InitializeHooks(ctx context.Context, cfg *config.Config, be *backend.Backen
 	}
 
 	for _, repo := range repos {
+		if _, err := repo.Open(); err != nil {
+			return fmt.Errorf("open repository %q: %w", repo.Name(), err)
+		}
 		if err := hooks.GenerateHooks(ctx, cfg, repo.Name()); err != nil {
 			return err
 		}
