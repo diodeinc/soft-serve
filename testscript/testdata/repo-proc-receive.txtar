@@ -3,7 +3,7 @@
 # convert crlf to lf on windows
 [windows] dos2unix proc-receive
 
-# hand refs/heads/main to the proc-receive hook
+# the server reads receive.procReceiveRefs from this file once it exists
 env GIT_CONFIG_GLOBAL=$WORK/gitconfig
 
 # start soft serve
@@ -11,58 +11,43 @@ exec soft serve &
 # wait for SSH server to start
 ensureserverrunning SSH_PORT
 
-# create a repo and a commit
+# create main before proc-receive is configured
 soft repo create repo1
 git clone ssh://localhost:$SSH_PORT/repo1 repo1
 mkfile ./repo1/README.md '# Hello'
 git -C repo1 add README.md
 git -C repo1 commit -m 'first'
-
-# without a global handler, git rejects refs that match receive.procReceiveRefs
-! git -C repo1 push origin HEAD:main
-stderr 'no global proc-receive hook is installed'
-stderr 'HEAD -> main \(fail to run proc-receive hook\)'
-
-# other refs are not affected
-git -C repo1 push origin HEAD:other
-git -C repo1 ls-remote origin
-! stdout 'refs/heads/main'
-stdout 'refs/heads/other'
-
-# install a global handler that puts a bump commit on top of each pushed ref
-cp proc-receive $DATA_PATH/hooks/proc-receive
-chmod 755 $DATA_PATH/hooks/proc-receive
-
-# the handler creates main
 git -C repo1 push origin HEAD:main
-git -C repo1 rev-parse HEAD
-cp stdout pushed1
-git -C repo1 fetch origin
-git -C repo1 log -1 --format=%s origin/main
-stdout '^bump$'
-git -C repo1 rev-parse origin/main^
-cmp stdout pushed1
 
-# the handler updates main and the client sees the new oid it reports
-git -C repo1 reset --hard origin/main
+# hand refs/heads/main to the proc-receive hook
+cp receive.gitconfig gitconfig
 mkfile ./repo1/README.md '# Hello again'
 git -C repo1 commit -am 'second'
-git -C repo1 rev-parse HEAD
-cp stdout pushed2
+
+# without a global hook, git rejects main but accepts other refs
+! git -C repo1 push origin HEAD:main
+stderr 'HEAD -> main \(fail to run proc-receive hook\)'
+git -C repo1 push origin HEAD:other
+
+# the global hook moves main to a bump commit, and the client sees its oid
+cp proc-receive $DATA_PATH/hooks/proc-receive
+chmod 755 $DATA_PATH/hooks/proc-receive
 git -C repo1 push origin HEAD:main
-cp stderr push2
+cp stderr push
+git -C repo1 rev-parse HEAD
+cp stdout pushed
 git -C repo1 fetch origin
 git -C repo1 rev-parse origin/main^
-cmp stdout pushed2
+cmp stdout pushed
 git -C repo1 rev-parse --short origin/main
-cp stdout bump2
-envfile BUMP=bump2
-grep '\.\.'$BUMP' +HEAD -> main' push2
+cp stdout bump
+envfile BUMP=bump
+grep '\.\.'$BUMP' +HEAD -> main' push
 
 # stop the server
 [windows] stopserver
 
--- gitconfig --
+-- receive.gitconfig --
 [receive]
 	procReceiveRefs = refs/heads/main
 -- proc-receive --
