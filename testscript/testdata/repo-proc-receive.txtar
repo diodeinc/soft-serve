@@ -1,0 +1,99 @@
+# vi: set ft=conf
+
+# convert crlf to lf on windows
+[windows] dos2unix proc-receive
+
+# hand refs/heads/main to the proc-receive hook
+env GIT_CONFIG_GLOBAL=$WORK/gitconfig
+
+# start soft serve
+exec soft serve &
+# wait for SSH server to start
+ensureserverrunning SSH_PORT
+
+# create a repo and a commit
+soft repo create repo1
+git clone ssh://localhost:$SSH_PORT/repo1 repo1
+mkfile ./repo1/README.md '# Hello'
+git -C repo1 add README.md
+git -C repo1 commit -m 'first'
+
+# without a global handler, git rejects refs that match receive.procReceiveRefs
+! git -C repo1 push origin HEAD:main
+stderr 'no global proc-receive hook is installed'
+stderr 'HEAD -> main \(fail to run proc-receive hook\)'
+
+# other refs are not affected
+git -C repo1 push origin HEAD:other
+git -C repo1 ls-remote origin
+! stdout 'refs/heads/main'
+stdout 'refs/heads/other'
+
+# install a global handler that puts a bump commit on top of each pushed ref
+cp proc-receive $DATA_PATH/hooks/proc-receive
+chmod 755 $DATA_PATH/hooks/proc-receive
+
+# the handler creates main
+git -C repo1 push origin HEAD:main
+git -C repo1 rev-parse HEAD
+cp stdout pushed1
+git -C repo1 fetch origin
+git -C repo1 log -1 --format=%s origin/main
+stdout '^bump$'
+git -C repo1 rev-parse origin/main^
+cmp stdout pushed1
+
+# the handler updates main and the client sees the new oid it reports
+git -C repo1 reset --hard origin/main
+mkfile ./repo1/README.md '# Hello again'
+git -C repo1 commit -am 'second'
+git -C repo1 rev-parse HEAD
+cp stdout pushed2
+git -C repo1 push origin HEAD:main
+cp stderr push2
+git -C repo1 fetch origin
+git -C repo1 rev-parse origin/main^
+cmp stdout pushed2
+git -C repo1 rev-parse --short origin/main
+cp stdout bump2
+envfile BUMP=bump2
+grep '\.\.'$BUMP' +HEAD -> main' push2
+
+# stop the server
+[windows] stopserver
+
+-- gitconfig --
+[receive]
+	procReceiveRefs = refs/heads/main
+-- proc-receive --
+#!/usr/bin/env bash
+# A trivial proc-receive handler. It puts a "bump" commit on top of each
+# pushed commit, moves the ref there, and reports the new oid back to Git.
+set -e
+
+# readpkt prints the payload of one pkt-line and fails on a flush-pkt.
+readpkt() {
+  len=$(dd bs=1 count=4 2>/dev/null)
+  [ "$len" != "0000" ] || return 1
+  dd bs=1 count=$((16#$len - 4)) 2>/dev/null | tr -d '\0'
+}
+writepkt() { printf '%04x%s' $((${#1} + 4)) "$1"; }
+
+# Version negotiation.
+while readpkt >/dev/null; do :; done
+writepkt "version=1"
+printf 0000
+
+# Commands: "<old-oid> <new-oid> <ref>".
+cmds=()
+while cmd=$(readpkt); do cmds+=("$cmd"); done
+
+# Report.
+for cmd in "${cmds[@]}"; do
+  read -r old new ref <<<"$cmd"
+  bump=$(git -c user.name=bot -c user.email=bot@example.com commit-tree "$new^{tree}" -p "$new" -m bump)
+  git update-ref "$ref" "$bump" "$old"
+  writepkt "ok $ref"
+  writepkt "option new-oid $bump"
+done
+printf 0000
