@@ -849,14 +849,6 @@ exit 0
 
 Now, you should get a message after pushing changes to any repository.
 
-Soft Serve also supports a global `proc-receive` hook at
-`<data path>/hooks/proc-receive`. Git runs it only for refs that match
-`receive.procReceiveRefs` in the server's git config. The hook gets stdin and
-stdout from `git receive-pack` directly, and it must update those refs itself.
-Refer to [githooks(5)](https://git-scm.com/docs/githooks#proc-receive) for the
-protocol. When `receive.procReceiveRefs` is set and no global hook exists, Git
-rejects the matching refs.
-
 ## A note about RSA keys
 
 Unfortunately, due to a shortcoming in Go’s `x/crypto/ssh` package, Soft Serve
