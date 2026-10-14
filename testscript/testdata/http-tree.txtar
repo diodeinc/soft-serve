@@ -1,0 +1,43 @@
+# vi: set ft=conf
+
+# FIXME: don't skip windows
+[windows] skip 'curl makes github actions hang'
+
+# start soft serve
+exec soft serve &
+# wait for SSH server to start
+ensureserverrunning SSH_PORT
+
+# push a repo with nested files
+soft repo create repo1
+git clone ssh://localhost:$SSH_PORT/repo1 repo1
+mkfile ./repo1/README.md '# Hello'
+mkdir ./repo1/folder/sub
+mkfile './repo1/folder/sub/a b.txt' 'hello'
+git -C repo1 add -A
+git -C repo1 commit -m 'first'
+git -C repo1 push origin HEAD
+git -C repo1 rev-parse HEAD
+cp stdout headfile
+envfile HEAD=headfile
+git -C repo1 rev-parse HEAD^{tree}
+cp stdout treefile
+envfile TREE=treefile
+
+# list every blob at the commit
+curl http://localhost:$HTTP_PORT/repo1/tree/$HEAD
+cmp stdout tree.json
+
+# trees and unknown commits are not found
+curl http://localhost:$HTTP_PORT/repo1/tree/$TREE
+stdout '404 Not Found'
+curl http://localhost:$HTTP_PORT/repo1/tree/0000000000000000000000000000000000000000
+stdout '404 Not Found'
+
+# private repos need read access
+soft repo private repo1 true
+curl http://localhost:$HTTP_PORT/repo1/tree/$HEAD
+stdout '401 Unauthorized'
+
+-- tree.json --
+[{"path":"README.md","size":7},{"path":"folder/sub/a b.txt","size":5}]

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -155,6 +156,11 @@ var gitRoutes = []GitRoute{
 		method:  []string{http.MethodGet},
 		handler: getIdxFile,
 		path:    "/objects/pack/{_:pack-[0-9a-f]{40}\\.idx$}",
+	},
+	{
+		method:  []string{http.MethodGet},
+		handler: getTree,
+		path:    "/tree/{sha:[0-9a-f]{40}$}",
 	},
 	// Git LFS
 	{
@@ -558,6 +564,36 @@ func getIdxFile(w http.ResponseWriter, r *http.Request) {
 func getTextFile(w http.ResponseWriter, r *http.Request) {
 	hdrNocache(w)
 	sendFile("text/plain", w, r)
+}
+
+// getTree lists every blob at a commit with its size.
+func getTree(w http.ResponseWriter, r *http.Request) {
+	dir, sha := mux.Vars(r)["dir"], mux.Vars(r)["sha"]
+	out, err := gitb.NewCommand("ls-tree", "-r", "-l", "-z", sha+"^{commit}").
+		WithContext(r.Context()).RunInDir(dir)
+	if err != nil {
+		renderNotFound(w, r)
+		return
+	}
+
+	type entry struct {
+		Path string `json:"path"`
+		Size int64  `json:"size"`
+	}
+	entries := []entry{}
+	for _, line := range strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00") {
+		// <mode> <type> <oid> <size>\t<path>
+		meta, path, _ := strings.Cut(line, "\t")
+		fields := strings.Fields(meta)
+		if len(fields) != 4 || fields[1] != "blob" {
+			continue
+		}
+		size, _ := strconv.ParseInt(fields[3], 10, 64)
+		entries = append(entries, entry{Path: path, Size: size})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(entries) //nolint: errcheck
 }
 
 func sendFile(contentType string, w http.ResponseWriter, r *http.Request) {
