@@ -24,6 +24,10 @@ stderr 'repository not found'
 
 # user1 also must not be able to import the server-local repo path
 ! usoft repo import stolen "$DATA_PATH/repos/secret.git" --lfs-endpoint http://example.com
+stderr 'unauthorized'
+
+# nobody can import a server-local path, not even an admin
+! soft repo import stolen "$DATA_PATH/repos/secret.git" --lfs-endpoint http://example.com
 stderr 'remote must be a network URL'
 
 # the failed import must not create a readable repo

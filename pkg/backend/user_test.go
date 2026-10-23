@@ -72,6 +72,35 @@ func TestAccessLevelPrivateRepoNonCollaborator(t *testing.T) {
 	is.Equal(be.AccessLevelForUser(ctx, "repo", nil), access.NoAccess)
 }
 
+// TestAccessLevelNonexistentRepo verifies that a signed-in non-admin gets no
+// more access to a repository name that does not exist yet than an anonymous
+// caller, so they cannot create repositories, e.g. in another tenant's
+// namespace, unless anon-access allows everyone to write.
+func TestAccessLevelNonexistentRepo(t *testing.T) {
+	for _, anon := range []access.AccessLevel{
+		access.NoAccess,
+		access.ReadOnlyAccess,
+		access.ReadWriteAccess,
+	} {
+		t.Run(anon.String(), func(t *testing.T) {
+			is := is.New(t)
+			be, _ := newTestBackend(t)
+			ctx := context.Background()
+
+			is.NoErr(be.SetAnonAccess(ctx, anon))
+
+			user, err := be.CreateUser(ctx, "stranger", proto.UserOptions{})
+			is.NoErr(err)
+			admin, err := be.CreateUser(ctx, "boss", proto.UserOptions{Admin: true})
+			is.NoErr(err)
+
+			is.Equal(be.AccessLevelForUser(ctx, "other/x", user), anon)
+			is.Equal(be.AccessLevelForUser(ctx, "other/x", nil), anon)
+			is.Equal(be.AccessLevelForUser(ctx, "other/x", admin), access.AdminAccess)
+		})
+	}
+}
+
 // TestDeleteUserWithRepositories verifies that a user who owns
 // repositories is not deleted until those repositories are gone, and that
 // their repositories are left untouched by the refusal.

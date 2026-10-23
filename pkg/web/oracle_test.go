@@ -120,14 +120,12 @@ func TestReceivePackDoesNotRevealPrivateRepositories(t *testing.T) {
 	_, err := f.be.Repository(f.ctx, "ghost")
 	is.True(err != nil)
 
-	// A signed-in user's push to a private repository they cannot read is
-	// a 404, the same as every other unreadable repository, while a push
-	// to a new name still creates it.
-	is.Equal(f.do(http.MethodGet, "/secret.git/info/refs?service=git-receive-pack", auth).Code, http.StatusNotFound)
-	is.Equal(f.do(http.MethodPost, "/secret.git/git-receive-pack", auth).Code, http.StatusNotFound)
-	is.Equal(f.do(http.MethodGet, "/ghost.git/info/refs?service=git-receive-pack", auth).Code, http.StatusOK)
+	// A signed-in non-admin's push answers 404 for a private repository
+	// and for a new name alike, and creates nothing: only admins create.
+	f.assertSameAnswer(t, http.MethodGet, "/%s.git/info/refs?service=git-receive-pack", auth, http.StatusNotFound)
+	f.assertSameAnswer(t, http.MethodPost, "/%s.git/git-receive-pack", auth, http.StatusNotFound)
 	_, err = f.be.Repository(f.ctx, "ghost")
-	is.NoErr(err)
+	is.True(err != nil)
 }
 
 // TestReceivePackReaderIsForbidden verifies a caller who can read but not

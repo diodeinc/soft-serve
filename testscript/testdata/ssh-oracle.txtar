@@ -78,12 +78,13 @@ cmp stderr invalidrepoerr.txt
 stderr 'invalid repo'
 
 # a push to a private repo the user cannot read is refused the same way,
-# while a push to a new name still creates it
+# and so is a push to a new name, since only admins create repositories
 ! usoft git-receive-pack secret
 cmp stderr invalidrepoerr.txt
-ugit -C secret push ssh://localhost:$SSH_PORT/newname HEAD
-usoft repo list
-stdout 'newname'
+! ugit -C secret push ssh://localhost:$SSH_PORT/newname HEAD
+stderr 'invalid repo'
+soft repo list
+! stdout 'newname'
 ! stdout 'ghost'
 
 # a collaborator explicitly granted no access is treated like a stranger
