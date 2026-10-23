@@ -3,9 +3,13 @@ package backend
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
+	gitm "github.com/aymanbagabas/git-module"
 	"github.com/charmbracelet/soft-serve/pkg/db"
 	"github.com/charmbracelet/soft-serve/pkg/proto"
 	"github.com/matryer/is"
@@ -86,6 +90,47 @@ func TestValidateImportRemote(t *testing.T) {
 			// off to an internal one after validation has passed.
 			is.True(slices.Contains(env, "GIT_CONFIG_VALUE_0=false"))
 			is.True(slices.Contains(env, "GIT_CONFIG_KEY_0=http.followRedirects"))
+		})
+	}
+}
+
+// TestImportRepositoryRaceKeepsOtherRepo verifies that an import racing with
+// another repository created at the same name never removes that repository,
+// whether the import's clone fails or its claim on the name fails.
+func TestImportRepositoryRaceKeepsOtherRepo(t *testing.T) {
+	for _, cloneErr := range []error{errors.New("clone failed"), nil} {
+		t.Run(fmt.Sprint(cloneErr), func(t *testing.T) {
+			is := is.New(t)
+			be, cfg := newTestBackend(t)
+			ctx := context.Background()
+
+			var other proto.Repository
+			orig := gitClone
+			t.Cleanup(func() { gitClone = orig })
+			gitClone = func(_, dst string, _ ...gitm.CloneOptions) error {
+				if err := gitm.Init(dst, gitm.InitOptions{Bare: true}); err != nil {
+					return err
+				}
+				// Another user creates the same name while the clone runs.
+				var err error
+				other, err = be.CreateRepository(ctx, "race", nil, proto.RepositoryOptions{})
+				is.NoErr(err)
+				return cloneErr
+			}
+
+			_, err := be.ImportRepository(ctx, "race", nil, "https://1.1.1.1/x.git", proto.RepositoryOptions{})
+			is.True(err != nil)
+
+			r, err := be.Repository(ctx, "race")
+			is.NoErr(err)
+			is.Equal(r.ID(), other.ID())
+			_, err = r.Open()
+			is.NoErr(err)
+
+			// The import's staging clone is gone too.
+			entries, err := os.ReadDir(filepath.Join(cfg.DataPath, "repos"))
+			is.NoErr(err)
+			is.Equal(len(entries), 1)
 		})
 	}
 }
