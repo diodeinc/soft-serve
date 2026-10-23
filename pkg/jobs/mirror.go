@@ -3,7 +3,6 @@ package jobs
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -25,13 +24,14 @@ func init() {
 type mirrorPull struct{}
 
 // validateMirrorRemotes validates every remote configured on a mirror
-// repository and returns the git environment that must be applied to the sync
-// commands.
+// repository against address ranges and the operator's ssh host policy, and
+// returns them so the caller can render the git environment that must be
+// applied to the sync commands.
 //
 // `git remote update` fetches from all remotes, not just origin, so every one
 // of them has to pass. Any failure to read or validate skips the sync: a
 // remote that cannot be checked is not one to fetch from.
-func validateMirrorRemotes(r *git.Repository) ([]string, error) {
+func validateMirrorRemotes(r *git.Repository, policy ssrf.GitRemotePolicy) ([]ssrf.ValidatedGitRemote, error) {
 	cfg, err := r.Config()
 	if err != nil {
 		return nil, fmt.Errorf("reading git config: %w", err)
@@ -44,7 +44,7 @@ func validateMirrorRemotes(r *git.Repository) ([]string, error) {
 			continue
 		}
 
-		v, err := ssrf.ValidateGitRemote(url)
+		v, err := ssrf.ValidateGitRemote(url, policy)
 		if err != nil {
 			return nil, fmt.Errorf("remote %q: %w", sub.Name, err)
 		}
@@ -55,7 +55,7 @@ func validateMirrorRemotes(r *git.Repository) ([]string, error) {
 		return nil, fmt.Errorf("no remote url configured")
 	}
 
-	return ssrf.GitEnv(remotes...), nil
+	return remotes, nil
 }
 
 // Spec derives the spec used for pull mirrors and implements Runner.
@@ -75,6 +75,13 @@ func (m mirrorPull) Func(ctx context.Context) func() {
 	dbx := db.FromContext(ctx)
 	datastore := store.FromContext(ctx)
 	return func() {
+		// The same guards that protect imports protect syncs, and the same
+		// too-old git ignores them.
+		if reason := b.ImportsDisabledReason(); reason != "" {
+			logger.Warn("skipping mirror sync", "reason", reason)
+			return
+		}
+
 		repos, err := b.Repositories(ctx)
 		if err != nil {
 			logger.Error("error getting repositories", "err", err)
@@ -103,20 +110,24 @@ func (m mirrorPull) Func(ctx context.Context) func() {
 					// `remote update` touches all of them, and a remote may
 					// predate the import-time guard or have been written out
 					// of band. Validation failure skips the repo entirely.
-					remoteEnv, err := validateMirrorRemotes(r)
+					// No user acts here, so the owner stands in for the
+					// importer. An owner that cannot be looked up gets the
+					// policy of nobody, which refuses ssh without an
+					// allowlist.
+					owner, err := b.UserByID(ctx, repo.UserID())
+					if err != nil {
+						logger.Warn("mirror owner not found, treating as unprivileged", "repo", name, "err", err)
+						owner = nil
+					}
+					policy := backend.RemotePolicy(cfg, owner)
+
+					remotes, err := validateMirrorRemotes(r, policy)
 					if err != nil {
 						logger.Warn("skipping mirror sync, remote failed validation", "repo", name, "err", err)
 						return
 					}
 
-					// remoteEnv carries the SSRF guard and must reach every
-					// command below, so build the full set once.
-					syncEnv := append(remoteEnv,
-						fmt.Sprintf(`GIT_SSH_COMMAND=ssh -o UserKnownHostsFile="%s" -o StrictHostKeyChecking=no -i "%s"`,
-							filepath.Join(cfg.DataPath, "ssh", "known_hosts"),
-							cfg.SSH.ClientKeyPath,
-						),
-					)
+					syncEnv := backend.RemoteGitEnv(cfg, remotes...)
 
 					cmds := []string{
 						"fetch --prune",         // fetch prune before updating remote
@@ -149,7 +160,7 @@ func (m mirrorPull) Func(ctx context.Context) func() {
 
 						// The endpoint is stored in the repo config and may
 						// predate validation, so check it before dialing.
-						if _, err := ssrf.ValidateGitRemote(lfsEndpoint); err != nil {
+						if _, err := ssrf.ValidateGitRemote(lfsEndpoint, policy); err != nil {
 							logger.Warn("skipping lfs sync, endpoint failed validation", "repo", name, "err", err)
 							return
 						}

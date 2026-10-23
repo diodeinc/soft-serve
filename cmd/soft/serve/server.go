@@ -107,6 +107,12 @@ func NewServer(ctx context.Context) (*Server, error) {
 
 	warnIfAnonAdminAccess(ctx, be, logger)
 
+	// The backend decides this on its own; surface it once at startup so the
+	// operator does not learn about it from the first failed import.
+	if reason := be.ImportsDisabledReason(); reason != "" {
+		logger.Error("imports and mirror syncs are disabled", "reason", reason)
+	}
+
 	return srv, nil
 }
 
@@ -158,12 +164,14 @@ func ensureDefaultRepo(ctx context.Context, cfg *config.Config, be *backend.Back
 		return
 	}
 
-	if _, err := be.CreateRepository(ctx, name, owner, proto.RepositoryOptions{}); err != nil && !errors.Is(err, proto.ErrRepoExist) {
+	switch _, err := be.CreateRepository(ctx, name, owner, proto.RepositoryOptions{}); {
+	case errors.Is(err, proto.ErrRepoExist):
+		logger.Warn("default repo directory exists without a database row, skipping", "name", name)
+	case err != nil:
 		logger.Warn("failed to create default repo", "name", name, "err", err)
-		return
+	default:
+		logger.Info("created default repo", "name", name)
 	}
-
-	logger.Info("created default repo", "name", name)
 }
 
 // ReloadCertificates reloads the TLS certificates for the HTTP server.

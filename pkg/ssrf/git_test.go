@@ -10,6 +10,10 @@ import (
 	"testing"
 )
 
+// anySSH is the policy of a server admin with no allowlist configured; it
+// keeps the address-validation table independent of the ssh policy.
+var anySSH = GitRemotePolicy{AllowAnySSHHost: true}
+
 func TestValidateGitRemote(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -24,7 +28,8 @@ func TestValidateGitRemote(t *testing.T) {
 		{"public https with port", "https://1.1.1.1:8443/x.git", GitTransportHTTP, nil},
 		{"public ipv6", "https://[2606:4700::1111]/x.git", GitTransportHTTP, nil},
 
-		// SSH is reachability-governed by the operator's client key.
+		// SSH is reachability-governed by the operator's client key, and
+		// here by a policy that allows any host.
 		{"ssh url", "ssh://git@10.0.0.1/x.git", GitTransportSSH, nil},
 		{"bare ssh", "git@github.com:charmbracelet/soft-serve.git", GitTransportSSH, nil},
 		{"git+ssh", "git+ssh://git@example.com/x.git", GitTransportSSH, nil},
@@ -62,11 +67,44 @@ func TestValidateGitRemote(t *testing.T) {
 
 		{"empty", "", 0, ErrInvalidURL},
 		{"no host", "https:///x.git", 0, ErrInvalidURL},
+		{"ssh no host", "ssh:///x.git", 0, ErrInvalidURL},
+
+		// URLs that Go refuses to parse but libcurl accepts. These used to
+		// fall through as scp-style SSH remotes and skip validation.
+		// Regression: http://a{b@127.0.0.1:8080/ reached loopback.
+		{"unparseable http userinfo", "http://a{b@127.0.0.1:8080/", 0, ErrInvalidURL},
+		{"unparseable git userinfo", "git://a{b@127.0.0.1:9418/x", 0, ErrInvalidURL},
+		{"unparseable http port", "http://a@127.0.0.1:80x/", 0, ErrInvalidURL},
+		{"unparseable http space", "http://a b@127.0.0.1/", 0, ErrInvalidURL},
+
+		// scp-style remotes that are really SSH.
+		{"bare ssh no user", "github.com:charmbracelet/soft-serve.git", GitTransportSSH, nil},
+		{"bare ssh ipv6", "git@[::1]:x.git", GitTransportSSH, nil},
+		{"bare ssh bracketed host port", "[git@example.com:2222]:x.git", GitTransportSSH, nil},
+		{"bare ssh brace in user", "a{b@127.0.0.1:x", GitTransportSSH, nil},
+		{"bare ssh scheme-looking host", "http:foo", GitTransportSSH, nil},
+
+		// Things that look a bit like scp syntax but are not SSH remotes.
+		{"bare ssh option host", "-oProxyCommand=id:x", 0, ErrInvalidURL},
+		{"bare ssh option user", "-oProxyCommand=id@host:x", 0, ErrInvalidURL},
+		{"bare ssh option host after user", "user@-host:x", 0, ErrInvalidURL},
+		{"ssh url option user", "ssh://-user@example.com/x", 0, ErrInvalidURL},
+		{"bare ssh slash before colon", "dir/host:x", 0, ErrUnsupportedRemoteScheme},
+		{"bare ssh slash inside brackets", "[a/b@c]:x", 0, ErrUnsupportedRemoteScheme},
+		{"bare ssh no colon", "host", 0, ErrUnsupportedRemoteScheme},
+		{"bare ssh user no colon", "user@host", 0, ErrUnsupportedRemoteScheme},
+		{"bare ssh unterminated bracket", "[host:22]path", 0, ErrInvalidURL},
+		{"bare ssh empty host", ":path", 0, ErrInvalidURL},
+		{"remote helper syntax", "host::path", 0, ErrUnsupportedRemoteScheme},
+		// An ssh host must be a plain DNS name or IP literal, so that the
+		// name the policy matched is the name ssh connects to.
+		{"ssh url non-canonical ip", "ssh://git@0177.0.0.1/x.git", 0, ErrAmbiguousHost},
+		{"ssh url unicode host", "ssh://git@gît.example/x.git", 0, ErrAmbiguousHost},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ValidateGitRemote(tt.remote)
+			got, err := ValidateGitRemote(tt.remote, anySSH)
 
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
@@ -92,7 +130,7 @@ func TestValidateGitRemoteResolvesHostnames(t *testing.T) {
 		t.Skip("requires DNS")
 	}
 
-	v, err := ValidateGitRemote("https://github.com/charmbracelet/soft-serve.git")
+	v, err := ValidateGitRemote("https://github.com/charmbracelet/soft-serve.git", anySSH)
 	if err != nil {
 		t.Fatalf("public hostname rejected: %v", err)
 	}
@@ -266,4 +304,38 @@ func hasGitConfig(env []string, key, value string) bool {
 		}
 	}
 	return false
+}
+
+// TestValidateGitRemoteErrorsHideResolver verifies that the messages handed
+// back to an importing user do not include the resolver's own error, which
+// names the server's DNS server ("lookup x on 10.0.0.53:53: no such host").
+func TestValidateGitRemoteErrorsHideResolver(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires DNS")
+	}
+
+	for _, remote := range []string{
+		"https://does-not-exist.invalid/x.git",
+		"git://does-not-exist.invalid/x.git",
+	} {
+		_, err := ValidateGitRemote(remote, anySSH)
+		if !errors.Is(err, ErrInvalidURL) {
+			t.Fatalf("ValidateGitRemote(%q) error = %v, want ErrInvalidURL", remote, err)
+		}
+		for _, leak := range []string{"lookup", " on ", ":53", "no such host", "server misbehaving"} {
+			if strings.Contains(err.Error(), leak) {
+				t.Errorf("ValidateGitRemote(%q) error %q leaks resolver detail %q", remote, err, leak)
+			}
+		}
+	}
+
+	// A URL Go cannot parse must produce exactly the typed error and its
+	// fixed reason, never the parser's own message.
+	_, err := ValidateGitRemote("http://a{b@127.0.0.1:8080/", anySSH)
+	if !errors.Is(err, ErrInvalidURL) {
+		t.Fatalf("unparseable remote error = %v, want ErrInvalidURL", err)
+	}
+	if got, want := err.Error(), "invalid URL: cannot parse remote"; got != want {
+		t.Errorf("unparseable remote error = %q, want %q", got, want)
+	}
 }

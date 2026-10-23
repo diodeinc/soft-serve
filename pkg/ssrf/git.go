@@ -84,31 +84,54 @@ func GitEnv(remotes ...ValidatedGitRemote) []string {
 }
 
 // ValidateGitRemote validates a git remote URL against private, internal, and
-// loopback address ranges.
+// loopback address ranges, and ssh remotes against the operator's policy.
 //
 // The result must be passed to GitEnv, and that environment applied to every
 // git subprocess touching the remote. Validation on its own does not survive
 // contact with git, which re-resolves hostnames and follows redirects.
 //
-// SSH remotes are allowed without IP validation: they authenticate with the
-// operator's own client key rather than anything an importing user controls.
-func ValidateGitRemote(remote string) (ValidatedGitRemote, error) {
+// SSH remotes are not IP-validated: they authenticate with the operator's own
+// client key, so which hosts they may reach is a policy question, answered by
+// the GitRemotePolicy, not an address-range one.
+//
+// Limitation: git:// remotes are validated but cannot be pinned, since git
+// dials them directly rather than through libcurl. git resolves the hostname
+// again on every fetch, so a name that changes answers between validation
+// and connect (DNS rebinding) is not caught for that transport.
+func ValidateGitRemote(remote string, policy GitRemotePolicy) (ValidatedGitRemote, error) {
 	if remote == "" {
 		return ValidatedGitRemote{}, ErrInvalidURL
 	}
 
+	// scp-like syntax is recognized on git's own terms, never as "whatever
+	// url.Parse rejects", since Go and libcurl disagree about what parses.
+	if user, host, ok := parseBareSSHRemote(remote); ok {
+		// The bracketed form [user@host:port]:path carries a port.
+		host, port := splitHostPort(host)
+		if err := validateSSHHost(user, host); err != nil {
+			return ValidatedGitRemote{}, err
+		}
+		if err := policy.checkSSH(host, port); err != nil {
+			return ValidatedGitRemote{}, err
+		}
+		return ValidatedGitRemote{Transport: GitTransportSSH}, nil
+	}
+
+	// The parse error is dropped on purpose: these messages go back to the
+	// user, and only the typed error is needed to act on them.
 	u, err := url.Parse(remote)
 	if err != nil {
-		// Bare SSH syntax (git@host:path) is not a parseable URL. Anything
-		// else that fails to parse is rejected rather than passed through.
-		if isBareSSHRemote(remote) {
-			return ValidatedGitRemote{Transport: GitTransportSSH}, nil
-		}
-		return ValidatedGitRemote{}, fmt.Errorf("%w: %v", ErrInvalidURL, err)
+		return ValidatedGitRemote{}, fmt.Errorf("%w: cannot parse remote", ErrInvalidURL)
 	}
 
 	switch u.Scheme {
 	case "ssh", "git+ssh", "ssh+git":
+		if err := validateSSHHost(u.User.Username(), u.Hostname()); err != nil {
+			return ValidatedGitRemote{}, err
+		}
+		if err := policy.checkSSH(u.Hostname(), u.Port()); err != nil {
+			return ValidatedGitRemote{}, err
+		}
 		return ValidatedGitRemote{Transport: GitTransportSSH}, nil
 
 	case "git":
@@ -164,9 +187,14 @@ func validateRemoteHost(host string) (netip.Addr, error) {
 		return netip.Addr{}, fmt.Errorf("%w: %q", ErrAmbiguousHost, host)
 	}
 
+	// The resolver error names the server's DNS resolver ("lookup x on
+	// 10.0.0.53:53"), which the importing user has no business learning.
+	// Telling "cannot resolve" apart from "private address" is kept on
+	// purpose: it is one bit of recon over an authenticated session, and it
+	// is what lets a user notice a typo in the hostname.
 	ips, err := net.DefaultResolver.LookupIPAddr(context.Background(), host)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("%w: cannot resolve hostname: %v", ErrInvalidURL, err)
+		return netip.Addr{}, fmt.Errorf("%w: cannot resolve hostname", ErrInvalidURL)
 	}
 	if len(ips) == 0 {
 		return netip.Addr{}, fmt.Errorf("%w: no addresses for hostname", ErrInvalidURL)
@@ -251,12 +279,46 @@ func isIPLiteral(host string) bool {
 	return err == nil
 }
 
-// isBareSSHRemote reports whether a remote uses scp-like syntax
-// (user@host:path), which is an SSH remote rather than a malformed URL.
-func isBareSSHRemote(remote string) bool {
-	at := strings.Index(remote, "@")
-	if at <= 0 {
-		return false
+// parseBareSSHRemote recognizes git's scp-like remote syntax
+// (user@host:path, [user@host:port]:path, user@[v6:addr]:path) and returns
+// the user and host. The rules mirror git's connect.c: "://" is a URL, a
+// slash before the first colon is a local path, "::" selects a remote helper,
+// and brackets count only at the start or right after "user@".
+func parseBareSSHRemote(remote string) (user, host string, ok bool) {
+	colon, slash := strings.IndexByte(remote, ':'), strings.IndexByte(remote, '/')
+	if strings.Contains(remote, "://") || colon < 0 || (slash >= 0 && slash < colon) {
+		return "", "", false
 	}
-	return strings.Contains(remote[at:], ":")
+	userHost, rest := remote[:colon], remote[colon:]
+	if open := strings.IndexByte(remote, '['); open == 0 || (open > 0 && open < colon && remote[open-1] == '@') {
+		end := strings.IndexByte(remote, ']')
+		if end < 0 {
+			return "", "", false
+		}
+		userHost, rest = remote[:open]+remote[open+1:end], remote[end+1:]
+	}
+	if !strings.HasPrefix(rest, ":") || strings.HasPrefix(rest, "::") {
+		return "", "", false
+	}
+	if at := strings.LastIndexByte(userHost, '@'); at >= 0 {
+		return userHost[:at], userHost[at+1:], true
+	}
+	return "", userHost, true
+}
+
+// validateSSHHost rejects SSH remotes with no host, whose user or host would
+// reach ssh as a command-line option, or whose host is not a plain DNS name
+// or IP literal. The last part is what lets an allowlist match mean
+// anything: ssh connects to exactly the name that was matched.
+func validateSSHHost(user, host string) error {
+	if host == "" {
+		return fmt.Errorf("%w: missing hostname", ErrInvalidURL)
+	}
+	if strings.HasPrefix(host, "-") || strings.HasPrefix(user, "-") {
+		return fmt.Errorf("%w: ssh user or host looks like a command-line option", ErrInvalidURL)
+	}
+	if !isDNSName(host) && !isIPLiteral(host) {
+		return fmt.Errorf("%w: %q", ErrAmbiguousHost, host)
+	}
+	return nil
 }

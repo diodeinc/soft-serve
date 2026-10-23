@@ -184,6 +184,27 @@ ssh:
   # ssh remotes.
   client_key_path: "ssh/soft_serve_client"
 
+  # How the server's ssh client verifies host keys of ssh remotes it imports
+  # or mirrors from, checked against <data_path>/ssh/known_hosts.
+  # "accept-new" records a host key on first contact and refuses a changed
+  # one (needs OpenSSH 7.6 or newer). "yes" refuses any host that is not
+  # already in known_hosts; use it with a pre-seeded known_hosts file.
+  client_strict_host_key_checking: "accept-new"
+
+  # The ssh hosts that repositories may be imported from or mirrored. The
+  # client key above is presented to every host a user imports from, so list
+  # only hosts you trust that key with. Entries are hostnames, IP addresses,
+  # or CIDR ranges, each with an optional port. When the list is empty, only
+  # server admins may import from or mirror ssh remotes.
+  # CIDR entries are checked against DNS only at import or sync time and ssh
+  # resolves the name again, so prefer hostnames for anything you do not
+  # control. The list is matched against the name given to ssh; your
+  # ssh_config still applies to it.
+  client_allowed_hosts: []
+    # - "git.internal.example"
+    # - "gitlab.corp:2222"
+    # - "10.0.0.0/8"
+
   # The maximum number of seconds a connection can take.
   # A value of 0 means no timeout.
   max_timeout: 0
