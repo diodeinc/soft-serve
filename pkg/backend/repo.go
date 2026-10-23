@@ -49,6 +49,16 @@ func validateImportRemote(remote string) ([]string, error) {
 //
 // It implements backend.Backend.
 func (d *Backend) CreateRepository(ctx context.Context, name string, user proto.User, opts proto.RepositoryOptions) (proto.Repository, error) {
+	return d.createRepository(ctx, name, user, opts, "")
+}
+
+// createRepository creates the repository's database row and its directory
+// in one transaction. When src is empty, a new bare repository is
+// initialized. Otherwise src, a staged repository owned by the caller, is
+// moved into place; the database row reserves the name, so the move only
+// happens once this call owns it. If a later step fails, src is moved back
+// for the caller to clean up and the destination is left untouched.
+func (d *Backend) createRepository(ctx context.Context, name string, user proto.User, opts proto.RepositoryOptions, src string) (proto.Repository, error) {
 	name = utils.SanitizeRepo(name)
 	if err := utils.ValidateRepo(name); err != nil {
 		return nil, err
@@ -90,25 +100,45 @@ func (d *Backend) CreateRepository(ctx context.Context, name string, user proto.
 			return err
 		}
 
-		_, err := git.Init(rp, true)
-		if err != nil {
-			d.logger.Debug("failed to create repository", "err", err)
-			return err
-		}
-
-		if err := os.WriteFile(filepath.Join(rp, "description"), []byte(opts.Description), fs.ModePerm); err != nil {
-			d.logger.Error("failed to write description", "repo", name, "err", err)
-			return err
-		}
-
-		if !opts.Private {
-			if err := os.WriteFile(filepath.Join(rp, "git-daemon-export-ok"), []byte{}, fs.ModePerm); err != nil {
-				d.logger.Error("failed to write git-daemon-export-ok", "repo", name, "err", err)
+		if src == "" {
+			if _, err := git.Init(rp, true); err != nil {
+				d.logger.Debug("failed to create repository", "err", err)
+				return err
+			}
+		} else {
+			// Rename refuses to replace a non-empty directory, so a stray
+			// repository directory without a database row is not clobbered.
+			if err := os.MkdirAll(filepath.Dir(rp), os.ModePerm); err != nil {
+				return err
+			}
+			if err := os.Rename(src, rp); err != nil {
 				return err
 			}
 		}
 
-		return hooks.GenerateHooks(ctx, d.cfg, name)
+		err := func() error {
+			if err := os.WriteFile(filepath.Join(rp, "description"), []byte(opts.Description), fs.ModePerm); err != nil {
+				d.logger.Error("failed to write description", "repo", name, "err", err)
+				return err
+			}
+
+			if !opts.Private {
+				if err := os.WriteFile(filepath.Join(rp, "git-daemon-export-ok"), []byte{}, fs.ModePerm); err != nil {
+					d.logger.Error("failed to write git-daemon-export-ok", "repo", name, "err", err)
+					return err
+				}
+			}
+
+			return hooks.GenerateHooks(ctx, d.cfg, name)
+		}()
+		if err != nil && src != "" {
+			// Still inside the transaction, so the name is still ours.
+			if rerr := os.Rename(rp, src); rerr != nil {
+				err = errors.Join(err, rerr)
+			}
+		}
+
+		return err
 	}); err != nil {
 		d.logger.Debug("failed to create repository in database", "err", err)
 		err = db.WrapError(err)
@@ -208,17 +238,28 @@ func (d *Backend) ImportRepository(_ context.Context, name string, user proto.Us
 			},
 		}
 
-		if err := git.Clone(remote, rp, copts); err != nil {
-			d.logger.Error("failed to clone repository", "err", err, "mirror", opts.Mirror, "remote", remote, "path", rp)
-			// Cleanup the mess!
-			if rerr := os.RemoveAll(rp); rerr != nil {
-				err = errors.Join(err, rerr)
-			}
+		// Clone into a staging directory only this import owns, on the same
+		// filesystem as the destination so it can be renamed into place.
+		// The destination name is claimed later, under its database row, so
+		// a repository created at the same name meanwhile is never touched.
+		reposDir := filepath.Join(d.cfg.DataPath, "repos")
+		if err := os.MkdirAll(reposDir, os.ModePerm); err != nil {
+			return err
+		}
+		staging, err := os.MkdirTemp(reposDir, ".import-*")
+		if err != nil {
+			return err
+		}
+		// After a successful claim staging no longer exists; otherwise it
+		// holds this import's clone.
+		defer os.RemoveAll(staging) //nolint:errcheck
 
+		if err := gitClone(remote, staging, copts); err != nil {
+			d.logger.Error("failed to clone repository", "err", err, "mirror", opts.Mirror, "remote", remote, "path", staging)
 			return err
 		}
 
-		r, err := d.CreateRepository(ctx, name, user, opts)
+		r, err := d.createRepository(ctx, name, user, opts, staging)
 		if err != nil {
 			d.logger.Error("failed to create repository", "err", err, "name", name)
 			return err
@@ -283,8 +324,19 @@ func (d *Backend) ImportRepository(_ context.Context, name string, user proto.Us
 		d.manager.Run(tid, done)
 	}()
 
-	return <-repoc, <-done
+	// The task only sends a repository once it has created one, so a failed
+	// import must not wait on repoc.
+	err = <-done
+	select {
+	case r := <-repoc:
+		return r, err
+	default:
+		return nil, err
+	}
 }
+
+// gitClone is git.Clone, replaceable in tests.
+var gitClone = git.Clone
 
 // DeleteRepository deletes a repository.
 //
