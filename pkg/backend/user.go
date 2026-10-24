@@ -47,8 +47,7 @@ func (d *Backend) AccessLevelByPublicKey(ctx context.Context, repo string, pk ss
 }
 
 // BaseAccessLevelByPublicKey returns the access level a key holds before
-// any repository is considered: the level it would get for a repository
-// that does not exist.
+// any repository is considered.
 func (d *Backend) BaseAccessLevelByPublicKey(ctx context.Context, pk ssh.PublicKey) access.AccessLevel {
 	if d.isAdminKey(pk) {
 		return access.AdminAccess
@@ -95,17 +94,16 @@ func (d *Backend) ReadableByPublicKey(ctx context.Context, name string, pk ssh.P
 	return d.Readable(ctx, name, user)
 }
 
-// baseAccessLevel is the level user holds for a repository that does not
-// exist: enough to create one when registered, the anonymous level otherwise.
+// baseAccessLevel is the level user holds before any repository is
+// considered: at least read-only when registered, the anonymous level
+// otherwise.
 func (d *Backend) baseAccessLevel(ctx context.Context, user proto.User) access.AccessLevel {
 	anon := d.AnonAccess(ctx)
 	switch {
 	case user != nil && user.IsAdmin():
 		return access.AdminAccess
-	case user != nil && anon > access.ReadWriteAccess:
-		return anon
 	case user != nil:
-		return access.ReadWriteAccess
+		return max(anon, access.ReadOnlyAccess)
 	}
 	return anon
 }
@@ -130,7 +128,9 @@ func (d *Backend) accessLevel(ctx context.Context, r proto.Repository, name stri
 		if d.repoPathExists(name) {
 			return access.NoAccess
 		}
-		return d.baseAccessLevel(ctx, user)
+		// Signing in grants nothing extra here: only admins, or everyone
+		// when anon-access allows writes, may create a repository.
+		return anon
 	}
 
 	// If the user is the owner, they have admin access.

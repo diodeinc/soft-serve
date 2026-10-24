@@ -15,8 +15,11 @@ soft user create foo --key "$USER1_AUTHORIZED_KEY"
 # create a repo
 soft repo create repo1
 soft repo create repo1p -p
+# only admins can create repositories; let foo own some
+soft user set-admin foo true
 usoft repo create repo2
 usoft repo create repo2p -p
+soft user set-admin foo false
 
 # SSH Git LFS Transfer command
 ! soft git-lfs-transfer

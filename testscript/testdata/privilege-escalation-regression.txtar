@@ -41,11 +41,15 @@ stdout 'Admin: false'
 
 # The attacker creates repositories named after the arguments they intend to
 # pass to the global commands. They own these, so they are repo-admin of them.
+# Only admins can create repositories now, so let user1 own them while
+# briefly an admin.
+soft user set-admin user1 true
 usoft repo create user1
 usoft repo create victim
 usoft repo create true
 usoft repo create admin-access
 usoft repo create admin
+soft user set-admin user1 false
 
 # Repo-admin access must not authorize global user commands.
 ! usoft user set-admin user1 true

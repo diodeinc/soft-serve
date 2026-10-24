@@ -47,17 +47,14 @@ func TestGlobalCommandsIgnoreRepositoryAccess(t *testing.T) {
 }
 
 // TestGlobalCommandsIgnoreAnonAdminAccess covers the variant that needs no
-// repository at all: with anon-access set to admin-access,
-// AccessLevelForUser returns AdminAccess to any authenticated user for a
-// nonexistent repository name.
+// repository at all: with anon-access set to admin-access, global commands
+// must still require a server admin.
 func TestGlobalCommandsIgnoreAnonAdminAccess(t *testing.T) {
 	is := is.New(t)
 	ctx, be := newAuthTestContext(t)
 	is.NoErr(be.SetAnonAccess(ctx, access.AdminAccess))
 
 	attackerCtx := withUser(t, ctx, be, "attacker", false)
-	attacker := proto.UserFromContext(attackerCtx)
-	is.Equal(be.AccessLevelForUser(attackerCtx, "nonexistent", attacker), access.AdminAccess)
 
 	err := runUser(t, attackerCtx, "set-admin", "attacker", "true")
 	if !errors.Is(err, proto.ErrUnauthorized) {

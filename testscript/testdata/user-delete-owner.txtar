@@ -6,7 +6,10 @@ exec soft serve &
 ensureserverrunning SSH_PORT
 
 soft user create foo --key "$USER1_AUTHORIZED_KEY"
+# only admins can create repositories; let foo own one
+soft user set-admin foo true
 usoft repo create foo-repo
+soft user set-admin foo false
 
 # a user who owns repositories cannot be removed until they are gone
 ! soft user delete foo

@@ -14,10 +14,11 @@ exec soft serve &
 # wait for SSH server to start
 ensureserverrunning SSH_PORT
 
-soft user create user1 --key "$USER1_AUTHORIZED_KEY"
+# only admins can create repositories, so import as an admin user
+soft user create user1 --key "$USER1_AUTHORIZED_KEY" --admin
 
-# an allowed host passes policy for a non-admin and fails only at the clone,
-# since nothing listens on loopback port 1
+# an allowed host passes policy and fails only at the clone, since nothing
+# listens on loopback port 1
 ! usoft repo import allowed1 ssh://git@127.0.0.1:1/x.git
 stderr 'import failed'
 ! stderr 'unauthorized'

@@ -100,7 +100,15 @@ stdout branch1
 # create a new user
 soft user create bar --key "$USER1_AUTHORIZED_KEY"
 
-# user create a repo
+# a regular user cannot create repositories, over SSH or by pushing
+! usoft repo create other/repo2
+stderr 'unauthorized'
+! usoft git-receive-pack other/repo2
+! usoft repo info other/repo2
+stderr 'repository not found'
+
+# an admin user can create a repo
+soft user set-admin bar true
 usoft repo create repo2 -d 'description' -H -p -n 'repo2'
 stderr 'Created repository repo2.*'
 stdout ssh://localhost:$SSH_PORT/repo2.git

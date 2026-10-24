@@ -133,6 +133,12 @@ stdout '404.*'
 cp stdout private.txt
 curl http://$UTOKEN@localhost:$HTTP_PORT/nope.git/info/refs?service=git-upload-pack
 cmp stdout private.txt
+
+# a signed-in non-admin cannot create a repository by pushing to it
+curl http://$UTOKEN@localhost:$HTTP_PORT/other/x.git/info/refs?service=git-receive-pack
+stdout '404.*'
+! soft repo info other/x
+stderr 'repository not found'
 curl http://someuser:somepassword@localhost:$HTTP_PORT/repo2.git/info/refs?service=git-upload-pack
 stdout '403.*'
 cp stdout private.txt
